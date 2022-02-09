@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates a Lambda function to delegate Security Hub master account in an AWS Organization.  A custom resource is created to immediately invoke the lambda function upon successful deployment.
+Parameters:
+  OrganizationId:
+    Type: String
+    Description: "The Amazon Organizations ID for Control Tower."
+    MinLength: 12
+    MaxLength: 12
+    AllowedPattern: '^[o][\-][a-z0-9]{10}$'
+    ConstraintDescription: "The Organization ID must be a 12 character string starting with o- and followed by 10 Lowercase Alphanumeric Characters."
+  SecurityHubMasterAccountId:
+    Type: String
+    Description: "The AWS Account ID that will be configured as the Delegated Admin."
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: "This must be a 12 character string."
+    MinLength: 12
+    MaxLength: 12
+  S3SourceBucket:
+    Type: String
+    Description: "The S3 Bucket that contains the Lambda Zip File."
+  S3Key:
+    Type: String
+    Description: "The S3 Path to the Lambda Zip File"
+  RoleToAssume:
+    Type: String
+    Default: 'AWSControlTowerExecution'
+    Description: "What role should be assumed in accounts to enable GuardDuty?  The Default is AWSControlTowerExecution for a Control Tower environment."
+  EnableAWSFoundations:
+    Type: String
+    Default: "Yes"
+    Description: "Enable the AWS Foundational Security Best Practices v1.0.0 Security Standards Checks within Security Hub"
+    AllowedValues:
+      - "Yes"
+      - "No"
+  EnableCISFoundations:
+    Type: String
+    Default: "Yes"
+    Description: "Enable CIS AWS Foundations Benchmark v1.2.0 Security Standards Checks within Security Hub"
+    AllowedValues:
+      - "Yes"
+      - "No"    
+  EnablePCIDSS:
+    Type: String
+    Default: "No"
+    Description: "Enable the PCI DSS v3.2.1 Security Standards Checks within Security Hub"
+    AllowedValues:
+      - "Yes"
+      - "No"    
+Resources:
+  CustomResourceEnableSecurityHub:
+    Type: Custom::EnableSecurityHub
+    Properties:
+      ServiceToken: !GetAtt LambdaEnableSecurityHub.Arn
+  LambdaEnableSecurityHub: 
+    Type: AWS::Lambda::Function
+    Properties: 
+      Architectures:
+        - x86_64
+      Code: 
+        S3Bucket: !Ref S3SourceBucket
+        S3Key: !Ref S3Key
+      Description: "Lambda Function that is triggered by CloudFormation Custom Resource to Enable Security Hub by Default."
+      FunctionName: Lambda-Enable-Security-Hub
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRoleEnableSecurityHub.Arn
+      Runtime: python3.9
+      MemorySize: 256
+      Timeout: 600
+      Environment:
+        Variables:
+            SECURITY_HUB_MASTER_ACCOUNT_ID: !Ref SecurityHubMasterAccountId
+            ROLE_TO_ASSUME: !Ref RoleToAssume
+            AWS_FOUNDATIONS: !Ref EnableAWSFoundations
+            CIS_FOUNDATIONS: !Ref EnableCISFoundations
+            PCIDSS: !Ref EnablePCIDSS
+  LambdaRoleEnableSecurityHub: 
+    Type: AWS::IAM::Role
+    Properties: 
+      Description: "Service-Role for Lambda-Enable-Security-Hub to have the required access to execute successfully"
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "lambda.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies: 
+      - PolicyName: "Enable-Security-Hub"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+              - "sts:AssumeRole"
+            Resource: !Sub "arn:aws:iam::*:role/${RoleToAssume}"
+            Condition:
+              StringEquals:
+                "aws:PrincipalOrgId": !Ref OrganizationId
+          - Effect: "Allow"
+            Action:
+              - "securityhub:BatchDisableStandards"
+              - "securityhub:BatchEnableStandards"
+              - "securityhub:CreateMembers"
+              - "securityhub:DeleteMembers"
+              - "securityhub:DescribeStandards"
+              - "securityhub:DisableOrganizationAdminAccount"
+              - "securityhub:DisassociateMembers"
+              - "securityhub:EnableOrganizationAdminAccount"
+              - "securityhub:EnableSecurityHub"
+              - "securityhub:GetEnabledStandards"
+              - "securityhub:GetFindings"
+              - "securityhub:ListOrganizationAdminAccounts"
+              - "securityhub:UpdateOrganizationConfiguration"
+            Resource: "*"
+          - Effect: "Allow"
+            Action:
+              - "organizations:DescribeOrganization"
+              - "organizations:EnableAWSServiceAccess"
+              - "organizations:ListAccounts"
+              - "organizations:ListAWSServiceAccessForOrganization"
+              - "organizations:RegisterDelegatedAdministrator"
+            Resource: "*"
+          - Effect: "Allow"
+            Action:
+              - "cloudformation:ListStackInstances"
+            Resource: "*"
+          - Effect: "Allow"
+            Action:
+              - "cloudtrail:DescribeTrails"
+            Resource: "*"            
+  LifeCycleRuleSecurityHub: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "AWS Security Hub LifeCycle Trigger"
+      EventPattern:
+        source: 
+          - "aws.controltower"
+        detail-type:
+          - "AWS Service Event via CloudTrail"
+        detail:
+          eventName:
+            - "CreateManagedAccount"
+      State: "ENABLED"
+      Targets: 
+        - Arn: !GetAtt LambdaEnableSecurityHub.Arn
+          Id: "NewAccount"
+  PermissionForCTEventToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !GetAtt LambdaEnableSecurityHub.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt LifeCycleRuleSecurityHub.Arn

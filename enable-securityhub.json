@@ -1,0 +1,34 @@
+[
+  {
+    "ParameterKey": "OrganizationId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SecurityHubMasterAccountId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "S3SourceBucket",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "S3Key",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "RoleToAssume",
+    "ParameterValue": "AWSControlTowerExecution"
+  },
+  {
+    "ParameterKey": "EnableAWSFoundations",
+    "ParameterValue": "Yes"
+  },  
+  {
+    "ParameterKey": "EnableCISFoundations",
+    "ParameterValue": "Yes"
+  },
+  {
+    "ParameterKey": "EnablePCIDSS",
+    "ParameterValue": "No"
+  }
+]
