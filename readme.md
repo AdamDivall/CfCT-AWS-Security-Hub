@@ -32,6 +32,7 @@ There is an overarching assumption that you already have [Customisation for Cont
 
 1.  Clone the GitHub Repo to your local device.
 2.  Create an S3 Bucket where you'll then upload the `securityhub.zip` file to. Make a note of the bucket name and the prefix to the `securityhub.zip`. Note: The region where you create the bucket will need to be in the region of the Control Tower home region since that is where the Lambda Function will be created.
+3.  Create a prefix within the S3 Bucket named `lambda-layers` and upload both `cfnresponse.zip` and `boto3.zip` to that prefix.
 
 ### Installation
 

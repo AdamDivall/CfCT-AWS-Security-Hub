@@ -809,7 +809,7 @@ Resources:
         - python3.9
       Content:
         S3Bucket: !Ref S3SourceBucket
-        S3Key: cfnresponse.zip
+        S3Key: lambda-layers/cfnresponse.zip
       Description: v1.1.2 of cfnresponse
       LayerName: cfnresponse
   LambdaLayerBoto3:
@@ -819,7 +819,7 @@ Resources:
         - python3.9
       Content:
         S3Bucket: !Ref S3SourceBucket
-        S3Key: boto3.zip
+        S3Key: lambda-layers/boto3.zip
       Description: v1.20 of Boto3
       LayerName: boto3    
 
