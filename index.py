@@ -185,6 +185,23 @@ def enable_security_hub_member(security_hub_master_account_session, region, acco
                 )
             except Exception:
                 print(f"Account ID: {account['Id']} is already associated with Security Hub Admin Account.")
+            if region != ct_home_region:
+                try:
+                    config_client=member_session.client('config', region_name=region)
+                    config_recorder=config_client.describe_configuration_recorders()
+                    config_client.put_configuration_recorder(
+                        ConfigurationRecorder={
+                            'name': config_recorder['ConfigurationRecorders'][0]['name'],
+                            'roleARN': config_recorder['ConfigurationRecorders'][0]['roleARN'],
+                            'recordingGroup': {
+                                'allSupported': True,
+                                'includeGlobalResourceTypes': False 
+                            }
+                        }
+                    )
+                    print(f"Excluded Global Resources from AWS Config in Region {region} in Account ID: {account['Id']}.")
+                except Exception as e:
+                    print(f"AWS Config is not Enable in Account ID: {account['Id']} in Region: {region}.")
         security_hub_state_machine_input={
             "SecurityHubMasterAccountId":security_hub_master_account_id,
             "LogArchiveAccountId":log_archive_account_id,

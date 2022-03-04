@@ -8,7 +8,6 @@ Parameters:
     MaxLength: 12
     AllowedPattern: '^[o][\-][a-z0-9]{10}$'
     ConstraintDescription: "The Organization ID must be a 12 character string starting with o- and followed by 10 Lowercase Alphanumeric Characters."
-    Default: "o-bzkyrdk1al"
   SecurityHubMasterAccountId:
     Type: String
     Description: "The AWS Account ID that will be configured as the Delegated Admin."
@@ -809,7 +808,7 @@ Resources:
         - python3.9
       Content:
         S3Bucket: !Ref S3SourceBucket
-        S3Key: lambda-layers/cfnresponse.zip
+        S3Key: "lambda-layers/cfnresponse.zip"
       Description: v1.1.2 of cfnresponse
       LayerName: cfnresponse
   LambdaLayerBoto3:
@@ -819,7 +818,7 @@ Resources:
         - python3.9
       Content:
         S3Bucket: !Ref S3SourceBucket
-        S3Key: lambda-layers/boto3.zip
+        S3Key: "lambda-layers/boto3.zip"
       Description: v1.20 of Boto3
       LayerName: boto3    
 
