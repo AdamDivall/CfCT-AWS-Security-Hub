@@ -8,6 +8,10 @@
     "ParameterValue": ""
   },
   {
+    "ParameterKey": "LogArchiveAccountId",
+    "ParameterValue": ""
+  },  
+  {
     "ParameterKey": "S3SourceBucket",
     "ParameterValue": ""
   },

@@ -8,11 +8,19 @@ Parameters:
     MaxLength: 12
     AllowedPattern: '^[o][\-][a-z0-9]{10}$'
     ConstraintDescription: "The Organization ID must be a 12 character string starting with o- and followed by 10 Lowercase Alphanumeric Characters."
+    Default: "o-bzkyrdk1al"
   SecurityHubMasterAccountId:
     Type: String
     Description: "The AWS Account ID that will be configured as the Delegated Admin."
     AllowedPattern: '^[0-9]{12}$'
     ConstraintDescription: "This must be a 12 character string."
+    MinLength: 12
+    MaxLength: 12
+  LogArchiveAccountId:
+    Type: String
+    Description: "The Amazon Control Tower Log Archive Account ID that will be configured with an S3 Bucket for the storing of centralised findings."
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: "TThis must be a 12 character string."
     MinLength: 12
     MaxLength: 12
   S3SourceBucket:
@@ -47,11 +55,15 @@ Parameters:
       - "Yes"
       - "No"    
 Resources:
-  CustomResourceEnableSecurityHub:
+
+  # CloudFormation Custom Resources
+  CustomResourceEnableOrganizationSecurityHub:
     Type: Custom::EnableSecurityHub
     Properties:
-      ServiceToken: !GetAtt LambdaEnableSecurityHub.Arn
-  LambdaEnableSecurityHub: 
+      ServiceToken: !GetAtt LambdaEnableOrganizationSecurityHub.Arn
+
+  # Lambda Functions, Lambda Layers & Associated IAM Roles/Policies
+  LambdaEnableOrganizationSecurityHub: 
     Type: AWS::Lambda::Function
     Properties: 
       Architectures:
@@ -59,24 +71,26 @@ Resources:
       Code: 
         S3Bucket: !Ref S3SourceBucket
         S3Key: !Ref S3Key
-      Description: "Lambda Function that is triggered by CloudFormation Custom Resource to Enable Security Hub by Default."
-      FunctionName: Lambda-Enable-Security-Hub
+      Description: "Lambda Function that is triggered by CloudFormation Custom Resource to Enable Security Hub by Default in the Organization."
+      FunctionName: Lambda-Enable-Organization-Security-Hub
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaRoleEnableSecurityHub.Arn
+      Role: !GetAtt IAMRoleEnableOrganizationSecurityHub.Arn
       Runtime: python3.9
       MemorySize: 256
       Timeout: 600
+      Layers:
+        - !Ref LambdaLayerBoto3
+        - !Ref LambdaLayerCfnresponse
       Environment:
         Variables:
             SECURITY_HUB_MASTER_ACCOUNT_ID: !Ref SecurityHubMasterAccountId
+            LOG_ARCHIVE_ACCOUNT_ID: !Ref LogArchiveAccountId
+            SECURITY_HUB_STATE_MACHINE_ARN: !Ref StepFunctionSecurityHub
             ROLE_TO_ASSUME: !Ref RoleToAssume
-            AWS_FOUNDATIONS: !Ref EnableAWSFoundations
-            CIS_FOUNDATIONS: !Ref EnableCISFoundations
-            PCIDSS: !Ref EnablePCIDSS
-  LambdaRoleEnableSecurityHub: 
+  IAMRoleEnableOrganizationSecurityHub:
     Type: AWS::IAM::Role
     Properties: 
-      Description: "Service-Role for Lambda-Enable-Security-Hub to have the required access to execute successfully"
+      Description: "Service-Role for Lambda-Enable-Organization-Security-Hub to have the required access to execute successfully"
       AssumeRolePolicyDocument: 
         Version: "2012-10-17"
         Statement: 
@@ -89,50 +103,887 @@ Resources:
       Path: "/"
       ManagedPolicyArns:
         - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-      Policies: 
-      - PolicyName: "Enable-Security-Hub"
-        PolicyDocument:
-          Version: "2012-10-17"
-          Statement:
+        - !Ref IAMPolicyEnableOrganisationSecurityHub
+      RoleName: "LambdaExecutionRole-EnableOrganizationSecurityHub"
+  IAMPolicyEnableOrganisationSecurityHub:
+    Type: AWS::IAM::ManagedPolicy
+    Properties: 
+      ManagedPolicyName: "Custom-Enable-Organisation-Security-Hub"
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - "sts:AssumeRole"
+          Resource: !Sub "arn:aws:iam::*:role/${RoleToAssume}"
+          Condition:
+            StringEquals:
+              "aws:PrincipalOrgId": !Ref OrganizationId
+        - Effect: "Allow"
+          Action:
+            - "securityhub:DisableOrganizationAdminAccount"
+            - "securityhub:EnableOrganizationAdminAccount"
+            - "securityhub:ListOrganizationAdminAccounts"
+          Resource: 
+            - !Sub "arn:aws:securityhub:*:${AWS::AccountId}:hub/default"
+        - Effect: "Allow"
+          Action:
+            - "organizations:DescribeOrganization"
+            - "organizations:EnableAWSServiceAccess"
+            - "organizations:ListAccounts"
+            - "organizations:ListAWSServiceAccessForOrganization"
+            - "cloudtrail:DescribeTrails"
+          Resource: "*"
+        - Effect: "Allow"
+          Action:
+            - "states:StartExecution"
+          Resource:
+            - !Ref StepFunctionSecurityHub
+        - Effect: "Allow"
+          Action:
+            - "organizations:RegisterDelegatedAdministrator"
+          Resource:
+            - !Sub "arn:aws:organizations::${AWS::AccountId}:account/${OrganizationId}/${SecurityHubMasterAccountId}"
+        - Effect: "Allow"
+          Action:
+            - "cloudformation:ListStackInstances"
+          Resource:
+            - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/AWSControlTowerBP-BASELINE-CONFIG:*"
+
+  LambdaEnableSecurityHubStandards: 
+    Type: AWS::Lambda::Function
+    Properties: 
+      Architectures:
+        - x86_64
+      Code: 
+        ZipFile: |
+          import boto3
+          import os
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+
+          config=Config(
+              retries={
+                  'max_attempts':10,
+                  'mode':'adaptive'
+              }
+          )
+
+          def lambda_handler(event, context):
+              region=event['Region']
+              account_id=event['AccountId']
+              role_to_assume=event['RoleToAssume']
+              member_session=assume_role(account_id, role_to_assume)
+              member_client=member_session.client('securityhub', region_name=region, config=config)
+              aws_foundations_arn=(f"arn:aws:securityhub:{region}::standards/aws-foundational-security-best-practices/v/1.0.0")
+              aws_foundations_subscription_arn=(f"arn:aws:securityhub:{region}:{account_id}:subscription/aws-foundational-security-best-practices/v/1.0.0")
+              cis_foundations_arn=("arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.2.0")
+              cis_foundations_subscription_arn=(f"arn:aws:securityhub:{region}:{account_id}:subscription/cis-aws-foundations-benchmark/v/1.2.0")
+              pcidss_arn=(f"arn:aws:securityhub:{region}::standards/pci-dss/v/3.2.1")
+              pcidss_subscription_arn=(f"arn:aws:securityhub:{region}:{account_id}:subscription/pci-dss/v/3.2.1")
+              if os.environ['AWS_FOUNDATIONS'] == 'Yes':
+                  try:
+                      member_client.batch_enable_standards(
+                          StandardsSubscriptionRequests=[
+                              {
+                                  'StandardsArn': aws_foundations_arn
+                              }
+                          ]
+                      )
+                      print(f"Enabled AWS Foundational Security Best Practices v1.0.0 Security Standard in Account ID: {account_id} in {region}.")
+                  except Exception as e:
+                      print(f"Failed to enable AWS Foundational Security Best Practices v1.0.0 Security Standard in Account ID: {account_id} in {region}. Error: {e}.")
+              else:
+                  try:
+                      member_client.batch_disable_standards(
+                          StandardsSubscriptionArns=[
+                              aws_foundations_subscription_arn
+                          ]
+                      )
+                      print(f"Disabled AWS Foundational Security Best Practices v1.0.0 Security Standard in Account ID: {account_id} in {region}.")
+                  except Exception as e:
+                      print(f"Failed to disable AWS Foundational Security Best Practices v1.0.0 Security Standard in Account ID: {account_id} in {region}. Error: {e}.")
+              if os.environ['CIS_FOUNDATIONS'] == 'Yes':
+                  try:
+                      member_client.batch_enable_standards(
+                          StandardsSubscriptionRequests=[
+                              {
+                                  'StandardsArn': cis_foundations_arn
+                              }
+                          ]
+                      )
+                      print(f"Enabled CIS AWS Foundations Benchmark v1.2.0 Security Standard in Account ID: {account_id} in {region}.")
+                  except Exception as e:
+                      print(f"Failed to enable CIS AWS Foundations Benchmark v1.2.0 Security Standard in Account ID: {account_id} in {region}. Error: {e}.")
+              else:
+                  try:
+                      member_client.batch_disable_standards(
+                          StandardsSubscriptionArns=[
+                              cis_foundations_subscription_arn
+                          ]
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark v1.2.0 Security Standard in Account ID: {account_id} in {region}.")
+                  except Exception as e:
+                      print(f"Failed to disable CIS AWS Foundations Benchmark v1.2.0 Security Standard in Account ID: {account_id} in {region}. Error: {e}.")
+              if os.environ['PCIDSS'] == 'Yes':
+                  try:
+                      member_client.batch_enable_standards(
+                          StandardsSubscriptionRequests=[
+                              {
+                                  'StandardsArn': pcidss_arn
+                              }
+                          ]
+                      )
+                      print(f"Enabled PCI DSS v3.2.1 Security Standard in Account ID: {account_id} in {region}.")
+                  except Exception as e:
+                      print(f"Failed to enable PCI DSS v3.2.1 Security Standard in Account ID: {account_id} in {region}. Error: {e}.")
+              else:
+                  try:
+                      member_client.batch_disable_standards(
+                          StandardsSubscriptionArns=[
+                              pcidss_subscription_arn
+                          ]
+                      )
+                      print(f"Disabled PCI DSS v3.2.1 Security Standard in Account ID: {account_id} in {region}.")
+                  except Exception as e:
+                      print(f"Failed to disable PCI DSS v3.2.1 Security Standard in Account ID: {account_id} in {region}. Error: {e}.")
+              event["AWSFoundationEnabled"]=os.environ['AWS_FOUNDATIONS']
+              event["CISFoundationEnabled"]=os.environ['CIS_FOUNDATIONS']
+              event["PCIDSSEnabled"]=os.environ['PCIDSS']
+              return event
+
+          def assume_role(aws_account_id, role_to_assume):
+              sts_client=boto3.client('sts')
+              response=sts_client.assume_role(
+                  RoleArn=f'arn:aws:iam::{aws_account_id}:role/{role_to_assume}',
+                  RoleSessionName='EnableSecurityHub'
+              )
+              sts_session=boto3.Session(
+                  aws_access_key_id=response['Credentials']['AccessKeyId'],
+                  aws_secret_access_key=response['Credentials']['SecretAccessKey'],
+                  aws_session_token=response['Credentials']['SessionToken']
+              )
+              print(f"Assumed session for Account ID: {aws_account_id}.")
+              return sts_session
+      FunctionName: "Lambda-Enable-Security-Hub-Standards"
+      Handler: index.lambda_handler
+      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and enables the Security Hub Standards as requested within the CloudFormation Parameters in all ACTIVE AWS Accounts within the Organization"
+      Role: !GetAtt IAMRoleEnableSecurityHubStandards.Arn
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 300
+      Environment:
+        Variables:
+            AWS_FOUNDATIONS: !Ref EnableAWSFoundations
+            CIS_FOUNDATIONS: !Ref EnableCISFoundations
+            PCIDSS: !Ref EnablePCIDSS
+  IAMRoleEnableSecurityHubStandards: 
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
           - Effect: "Allow"
-            Action:
+            Principal: 
+              Service: 
+                - "lambda.amazonaws.com"
+            Action: 
               - "sts:AssumeRole"
-            Resource: !Sub "arn:aws:iam::*:role/${RoleToAssume}"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Ref IAMPolicyEnableSecurityHubStandards
+      RoleName: "LambdaExecutionRole-EnableSecurityHubStandards"
+  IAMPolicyEnableSecurityHubStandards:
+    Type: AWS::IAM::ManagedPolicy
+    Properties: 
+      ManagedPolicyName: "Custom-Enable-Global-Security-Hub-Standards"
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Action: 
+              - "sts:AssumeRole"
+            Resource:
+              - !Sub "arn:aws:iam::*:role/${RoleToAssume}"
             Condition:
               StringEquals:
-                "aws:PrincipalOrgId": !Ref OrganizationId
+                "aws:PrincipalOrgId": !Ref OrganizationId              
+
+  LambdaDisableSecurityHubControlsAWSFoundations: 
+    Type: AWS::Lambda::Function
+    Properties: 
+      Architectures:
+        - x86_64
+      Code: 
+        ZipFile: |
+          import boto3
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+
+          config=Config(
+              retries={
+                  'max_attempts':10,
+                  'mode':'adaptive'
+              }
+          )
+
+          def lambda_handler(event, context):
+              region=event['Region']
+              account_id=event['AccountId']
+              ct_home_region=event['ControlTowerHomeRegion']
+              role_to_assume=event['RoleToAssume']
+              aws_foundations_enabled=event['AWSFoundationEnabled']
+              member_session=assume_role(account_id, role_to_assume)
+              member_client=member_session.client('securityhub', region_name=region, config=config)
+              if aws_foundations_enabled == 'Yes':
+                  if region != ct_home_region:
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/IAM.1',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'IAM.1 - IAM policies should not allow full '*' administrative privileges' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/IAM.2',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'IAM.2 - IAM users should not have IAM policies attached' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/IAM.3',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'IAM.3 - IAM users' access keys should be rotated every 90 days or less' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/IAM.4',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'IAM.4 - IAM root user access key should not exist' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/IAM.5',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'IAM.5 - MFA should be enabled for all IAM users that have a console password' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/IAM.6',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'IAM.6 - Hardware MFA should be enabled for the root user' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/IAM.7',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'IAM.7 - Password policies for IAM users should have strong configurations' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/IAM.8',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'IAM.8 - Unused IAM user credentials should be removed' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/IAM.21',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'IAM.21 - IAM customer managed policies that you create should not allow wildcard actions for services' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/aws-foundational-security-best-practices/v/1.0.0/Config.1',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'Disabled recording of global resources in all regions other than {ct_home_region}. This rule requires recording of global resources in order to pass.'
+                      )
+                      print(f"Disabled AWS Foundational Best Practices Control: 'Config.1 - AWS Config should be enabled' in Region {region}.")
+              else:
+                  print(f"AWS Foundational Best Practises is not enabled in Account ID: {account_id} in Region {region}")
+
+          def assume_role(aws_account_id, role_to_assume):
+              sts_client=boto3.client('sts')
+              response=sts_client.assume_role(
+                  RoleArn=f'arn:aws:iam::{aws_account_id}:role/{role_to_assume}',
+                  RoleSessionName='EnableSecurityHub'
+              )
+              sts_session=boto3.Session(
+                  aws_access_key_id=response['Credentials']['AccessKeyId'],
+                  aws_secret_access_key=response['Credentials']['SecretAccessKey'],
+                  aws_session_token=response['Credentials']['SessionToken']
+              )
+              print(f"Assumed session for Account ID: {aws_account_id}.")
+              return sts_session      
+      FunctionName: "Lambda-Security-Hub-Disable-AWS-Foundations-Global-Controls"
+      Handler: index.lambda_handler
+      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and disables both Global Controls and Non-Applicable Controls for the AWS Foundational Best Practices Security Standard within Security Hub in all ACTIVE AWS Accounts within the Organization"   
+      Role: !GetAtt IAMRoleDisableGlobalSecurityHubControls.Arn
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 300 
+  LambdaDisableSecurityHubControlsCISFoundations: 
+    Type: AWS::Lambda::Function
+    Properties: 
+      Architectures:
+        - x86_64
+      Code: 
+        ZipFile: |
+          import boto3
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+
+          config=Config(
+              retries={
+                  'max_attempts':10,
+                  'mode':'adaptive'
+              }
+          )
+
+          def lambda_handler(event, context):
+              log_archive_account_id=event['LogArchiveAccountId']
+              region=event['Region']
+              account_id=event['AccountId']
+              ct_home_region=event['ControlTowerHomeRegion']
+              role_to_assume=event['RoleToAssume']
+              cis_foundations_enabled=event['CISFoundationEnabled']
+              member_session=assume_role(account_id, role_to_assume)
+              member_client=member_session.client('securityhub', region_name=region, config=config)
+              if cis_foundations_enabled == 'Yes':
+                  if region != ct_home_region:
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.2',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.2 - Ensure multi-factor authentication (MFA) is enabled for all IAM users that have a console password' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.3',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.3 - Ensure credentials unused for 90 days or greater are disabled' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.4',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.4 - Ensure access keys are rotated every 90 days or less' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.5',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.5 - Ensure IAM password policy requires at least one uppercase letter' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.6',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.6 - Ensure IAM password policy requires at least one lowercase letter' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.7',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.7 - Ensure IAM password policy requires at least one symbol' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.8',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.8 - Ensure IAM password policy requires at least one number' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.9',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.9 - Ensure IAM password policy requires a minimum length of 14 or greater' in Region {region}.")                        
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.10',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.10 - Ensure IAM password policy prevents password reuse' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.11',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.11 - Ensure IAM password policy expires passwords within 90 days or less' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.12',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.12 - Ensure no root account access key exists' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.13',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.13 - Ensure MFA is enabled for the 'root' account' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.14',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.14 - Ensure hardware MFA is enabled for the 'root' account' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.16',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.16 - Ensure IAM policies are attached only to groups or roles' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.20',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.20 - Ensure a support role has been created to manage incidents with AWS Support' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.22',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.22 - Ensure IAM policies that allow full '*:*' administrative privileges are not created' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/2.5',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'Disabled recording of global resources in all regions other than {ct_home_region}. This rule requires recording of global resources in order to pass.'
+                      )
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '2.5 - Ensure AWS Config is enabled' in Region {region}.")
+                      if account_id == log_archive_account_id:
+                          member_client.update_standards_control(
+                              StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/2.7',
+                              ControlStatus='DISABLED',
+                              DisabledReason=f'Disabled recording of global resources in all regions other than {ct_home_region}. This rule requires recording of global resources in order to pass.'
+                          )
+                          print(f"Disabled CIS AWS Foundations Benchmark Control: '2.7 - Ensure CloudTrail logs are encrypted at rest using AWS KMS keys' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.1',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '1.1 - Avoid the use of the 'root' account' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.1',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.1 - Ensure a log metric filter and alarm exist for unauthorized API calls' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.2',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.2 - Ensure a log metric filter and alarm exist for AWS Management Console sign-in without MFA' in Region {region}.")    
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.3',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.3 - Ensure a log metric filter and alarm exist for usage of 'root' account' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.4',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.4 - Ensure a log metric filter and alarm exist for IAM policy changes' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.5',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.5 - Ensure a log metric filter and alarm exist for CloudTrail configuration changes' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.6',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.6 - Ensure a log metric filter and alarm exist for AWS Management Console authentication failures' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.7',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.7 - Ensure a log metric filter and alarm exist for disabling or scheduled deletion of customer managed keys' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.8',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.8 - Ensure a log metric filter and alarm exist for S3 bucket policy changes' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.9',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.9 - Ensure a log metric filter and alarm exist for AWS Config configuration changes' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.10',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.10 - Ensure a log metric filter and alarm exist for security group changes' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.11',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.11 - Ensure a log metric filter and alarm exist for changes to Network Access Control Lists (NACL)' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.12',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.12 - Ensure a log metric filter and alarm exist for changes to network gateways' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.13',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.13 - Ensure a log metric filter and alarm exist for route table changes' in Region {region}.")
+                  member_client.update_standards_control(
+                      StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.14',
+                      ControlStatus='DISABLED',
+                      DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
+                  )
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.14 - Ensure a log metric filter and alarm exist for VPC changes' in Region {region}.")
+              else:
+                  print(f"CIS AWS Foundations Benchmark Control is not enabled in Account ID: {account_id} in Region {region}")
+                  
+          def assume_role(aws_account_id, role_to_assume):
+              sts_client=boto3.client('sts')
+              response=sts_client.assume_role(
+                  RoleArn=f'arn:aws:iam::{aws_account_id}:role/{role_to_assume}',
+                  RoleSessionName='EnableSecurityHub'
+              )
+              sts_session=boto3.Session(
+                  aws_access_key_id=response['Credentials']['AccessKeyId'],
+                  aws_secret_access_key=response['Credentials']['SecretAccessKey'],
+                  aws_session_token=response['Credentials']['SessionToken']
+              )
+              print(f"Assumed session for Account ID: {aws_account_id}.")
+              return sts_session
+      FunctionName: "Lambda-Security-Hub-Disable-CIS-Foundations-Global-Controls"
+      Handler: index.lambda_handler
+      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and disables both Global Controls and Non-Applicable Controls for the CIS AWS Foundations Benchmark Security Standard within Security Hub in all ACTIVE AWS Accounts within the Organization"      
+      Role: !GetAtt IAMRoleDisableGlobalSecurityHubControls.Arn
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 300
+  LambdaDisableSecurityHubControlsPCIDSS: 
+    Type: AWS::Lambda::Function
+    Properties: 
+      Architectures:
+        - x86_64
+      Code: 
+        ZipFile: |
+          import boto3
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+
+          config=Config(
+              retries={
+                  'max_attempts':10,
+                  'mode':'adaptive'
+              }
+          )
+
+          def lambda_handler(event, context):
+              region=event['Region']
+              account_id=event['AccountId']
+              ct_home_region=event['ControlTowerHomeRegion']
+              role_to_assume=event['RoleToAssume']
+              pcidss_enabled=event['PCIDSSEnabled']
+              member_session=assume_role(account_id, role_to_assume)
+              member_client=member_session.client('securityhub', region_name=region, config=config)
+              if pcidss_enabled == 'Yes':
+                  if region != ct_home_region:
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/pci-dss/v/3.2.1/PCI.IAM.1',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled Payment Card Industry Data Security Standard Control: 'PCI.IAM.1 - IAM root user access key should not exist' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/pci-dss/v/3.2.1/PCI.IAM.2',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled Payment Card Industry Data Security Standard Control: 'PCI.IAM.2 - IAM users should not have IAM policies attached' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/pci-dss/v/3.2.1/PCI.IAM.3',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled Payment Card Industry Data Security Standard Control: 'PCI.IAM.3 - IAM policies should not allow full '*' administrative privileges' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/pci-dss/v/3.2.1/PCI.IAM.4',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled Payment Card Industry Data Security Standard Control: 'PCI.IAM.4 - Hardware MFA should be enabled for the root user' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/pci-dss/v/3.2.1/PCI.IAM.5',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled Payment Card Industry Data Security Standard Control: 'PCI.IAM.5 - Virtual MFA should be enabled for the root user' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/pci-dss/v/3.2.1/PCI.IAM.6',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
+                      )
+                      print(f"Disabled Payment Card Industry Data Security Standard Control: 'PCI.IAM.6 - MFA should be enabled for all IAM users' in Region {region}.")
+                      member_client.update_standards_control(
+                          StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/pci-dss/v/3.2.1/PCI.Config.1',
+                          ControlStatus='DISABLED',
+                          DisabledReason=f'Disabled recording of global resources in all regions other than {ct_home_region}. This rule requires recording of global resources in order to pass.'
+                      )
+                      print(f"Disabled Payment Card Industry Data Security Standard Control: 'PCI.Config.1 - AWS Config should be enabled' in Region {region}.")                                                                        
+              else:
+                  print(f"Payment Card Industry Data Security Standard is not enabled in Account ID: {account_id} in Region {region}")
+
+          def assume_role(aws_account_id, role_to_assume):
+
+              sts_client=boto3.client('sts')
+              response=sts_client.assume_role(
+                  RoleArn=f'arn:aws:iam::{aws_account_id}:role/{role_to_assume}',
+                  RoleSessionName='EnableSecurityHub'
+              )
+              sts_session=boto3.Session(
+                  aws_access_key_id=response['Credentials']['AccessKeyId'],
+                  aws_secret_access_key=response['Credentials']['SecretAccessKey'],
+                  aws_session_token=response['Credentials']['SessionToken']
+              )
+              print(f"Assumed session for Account ID: {aws_account_id}.")
+              return sts_session
+      FunctionName: "Lambda-Security-Hub-Disable-PCIDSS-Global-Controls"
+      Handler: index.lambda_handler
+      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and disables both Global Controls and Non-Applicable Controls for the Payment Card Industry Data Security Standard within Security Hub in all ACTIVE AWS Accounts within the Organization"            
+      Role: !GetAtt IAMRoleDisableGlobalSecurityHubControls.Arn
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 300
+  IAMRoleDisableGlobalSecurityHubControls: 
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
           - Effect: "Allow"
-            Action:
-              - "securityhub:BatchDisableStandards"
-              - "securityhub:BatchEnableStandards"
-              - "securityhub:CreateMembers"
-              - "securityhub:DeleteMembers"
-              - "securityhub:DescribeStandards"
-              - "securityhub:DisableOrganizationAdminAccount"
-              - "securityhub:DisassociateMembers"
-              - "securityhub:EnableOrganizationAdminAccount"
-              - "securityhub:EnableSecurityHub"
-              - "securityhub:GetEnabledStandards"
-              - "securityhub:GetFindings"
-              - "securityhub:ListOrganizationAdminAccounts"
-              - "securityhub:UpdateOrganizationConfiguration"
-            Resource: "*"
+            Principal: 
+              Service: 
+                - "lambda.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Ref IAMPolicyDisableGlobalSecurityHubControls
+      RoleName: "LambdaExecutionRole-DisableGlobalSecurityHubControls"
+  IAMPolicyDisableGlobalSecurityHubControls:
+    Type: AWS::IAM::ManagedPolicy
+    Properties: 
+      ManagedPolicyName: "Custom-Disable-Global-Security-Hub-Controls"
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
           - Effect: "Allow"
-            Action:
-              - "organizations:DescribeOrganization"
-              - "organizations:EnableAWSServiceAccess"
-              - "organizations:ListAccounts"
-              - "organizations:ListAWSServiceAccessForOrganization"
-              - "organizations:RegisterDelegatedAdministrator"
-            Resource: "*"
+            Action: 
+              - "sts:AssumeRole"
+            Resource:
+              - !Sub "arn:aws:iam::*:role/${RoleToAssume}"
+            Condition:
+              StringEquals:
+                "aws:PrincipalOrgId": !Ref OrganizationId              
+
+  LambdaLayerCfnresponse:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+        - python3.9
+      Content:
+        S3Bucket: !Ref S3SourceBucket
+        S3Key: cfnresponse.zip
+      Description: v1.1.2 of cfnresponse
+      LayerName: cfnresponse
+  LambdaLayerBoto3:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+        - python3.9
+      Content:
+        S3Bucket: !Ref S3SourceBucket
+        S3Key: boto3.zip
+      Description: v1.20 of Boto3
+      LayerName: boto3    
+
+  # Step Functions & Associated IAM Roles/Policies
+  StepFunctionSecurityHub:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: SecurityHubStateMachine
+      DefinitionString: 
+        Fn::Sub: |-
+          {
+            "StartAt": "Enable Security Hub Standards",
+            "States": {
+              "Enable Security Hub Standards": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "OutputPath": "$.Payload",
+                "Parameters": {
+                  "Payload.$": "$",
+                  "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaEnableSecurityHubStandards}:$LATEST"
+                },
+                "Retry": [
+                  {
+                    "ErrorEquals": [
+                      "Lambda.ServiceException",
+                      "Lambda.AWSLambdaException",
+                      "Lambda.SdkClientException"
+                    ],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 6,
+                    "BackoffRate": 2
+                  }
+                ],
+                "Next": "Wait"
+              },
+              "Wait": {
+                "Type": "Wait",
+                "Seconds": 15,
+                "Next": "Parallel"
+              },
+              "Parallel": {
+                "Type": "Parallel",
+                "End": true,
+                "Branches": [
+                  {
+                    "StartAt": "Disable AWS Foundations Global Controls",
+                    "States": {
+                      "Disable AWS Foundations Global Controls": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "OutputPath": "$.Payload",
+                        "Parameters": {
+                          "Payload.$": "$",
+                          "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaDisableSecurityHubControlsAWSFoundations}:$LATEST"
+                        },
+                        "Retry": [
+                          {
+                            "ErrorEquals": [
+                              "Lambda.ServiceException",
+                              "Lambda.AWSLambdaException",
+                              "Lambda.SdkClientException"
+                            ],
+                            "IntervalSeconds": 2,
+                            "MaxAttempts": 6,
+                            "BackoffRate": 2
+                          }
+                        ],
+                        "End": true
+                      }
+                    }
+                  },
+                  {
+                    "StartAt": "Disable CIS Foundations Global Controls",
+                    "States": {
+                      "Disable CIS Foundations Global Controls": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "OutputPath": "$.Payload",
+                        "Parameters": {
+                          "Payload.$": "$",
+                          "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaDisableSecurityHubControlsCISFoundations}:$LATEST"
+                        },
+                        "Retry": [
+                          {
+                            "ErrorEquals": [
+                              "Lambda.ServiceException",
+                              "Lambda.AWSLambdaException",
+                              "Lambda.SdkClientException"
+                            ],
+                            "IntervalSeconds": 2,
+                            "MaxAttempts": 6,
+                            "BackoffRate": 2
+                          }
+                        ],
+                        "End": true
+                      }
+                    }
+                  },
+                  {
+                    "StartAt": "Disable PCIDSS Global Controls",
+                    "States": {
+                      "Disable PCIDSS Global Controls": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "OutputPath": "$.Payload",
+                        "Parameters": {
+                          "Payload.$": "$",
+                          "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaDisableSecurityHubControlsPCIDSS}:$LATEST"
+                        },
+                        "Retry": [
+                          {
+                            "ErrorEquals": [
+                              "Lambda.ServiceException",
+                              "Lambda.AWSLambdaException",
+                              "Lambda.SdkClientException"
+                            ],
+                            "IntervalSeconds": 2,
+                            "MaxAttempts": 6,
+                            "BackoffRate": 2
+                          }
+                        ],
+                        "End": true
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+      RoleArn: !GetAtt IAMRoleTriggerEnableSecurityHubStateMachine.Arn
+  IAMRoleTriggerEnableSecurityHubStateMachine: 
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
           - Effect: "Allow"
-            Action:
-              - "cloudformation:ListStackInstances"
-            Resource: "*"
+            Principal: 
+              Service: 
+                - "states.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - !Ref IAMPolicyTriggerEnableSecurityHubStateMachine
+      RoleName: "StepFunctionsExecutionRole-TriggerEnableSecurityHubStateMachine"
+  IAMPolicyTriggerEnableSecurityHubStateMachine:
+    Type: AWS::IAM::ManagedPolicy
+    Properties: 
+      ManagedPolicyName: "Custom-Trigger-Security-Hub-State-Machine"
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
           - Effect: "Allow"
-            Action:
-              - "cloudtrail:DescribeTrails"
-            Resource: "*"            
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: 
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaEnableSecurityHubStandards}:$LATEST"
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaDisableSecurityHubControlsAWSFoundations}:$LATEST"
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaDisableSecurityHubControlsCISFoundations}:$LATEST"
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaDisableSecurityHubControlsPCIDSS}:$LATEST"
+
+  # EventBridge Rules & Permissions
   LifeCycleRuleSecurityHub: 
     Type: AWS::Events::Rule
     Properties: 
@@ -147,12 +998,12 @@ Resources:
             - "CreateManagedAccount"
       State: "ENABLED"
       Targets: 
-        - Arn: !GetAtt LambdaEnableSecurityHub.Arn
+        - Arn: !GetAtt LambdaEnableOrganizationSecurityHub.Arn
           Id: "NewAccount"
   PermissionForCTEventToInvokeLambda: 
     Type: AWS::Lambda::Permission
     Properties: 
-      FunctionName: !GetAtt LambdaEnableSecurityHub.Arn
+      FunctionName: !GetAtt LambdaEnableOrganizationSecurityHub.Arn
       Action: "lambda:InvokeFunction"
       Principal: "events.amazonaws.com"
       SourceArn: !GetAtt LifeCycleRuleSecurityHub.Arn
