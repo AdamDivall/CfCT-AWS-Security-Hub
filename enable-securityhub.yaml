@@ -25,7 +25,6 @@ Parameters:
   S3SourceBucket:
     Type: String
     Description: "The S3 Bucket that contains the Lambda Zip File."
-    Default: "security-fixes-eu-west-2"
   S3Key:
     Type: String
     Description: "The S3 Path to the Lambda Zip File"
