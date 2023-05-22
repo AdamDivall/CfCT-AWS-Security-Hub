@@ -22,15 +22,15 @@ def lambda_handler(event, context):
     control_tower_regions=get_control_tower_regions()
     security_hub_master_account_session=assume_role(security_hub_master_account_id, role_to_assume)
     accounts=get_all_accounts()
-    if 'RequestType' in event:    
+    if 'RequestType' in event:
         if (event['RequestType'] == 'Create' or event['RequestType'] == 'Update'):
             try:
                 for region in control_tower_regions:
                     if region in security_hub_regions:
                         ct_home_region=enable_security_hub_master(security_hub_master_account_session, region)
                         enable_security_hub_member(security_hub_master_account_session, region, accounts, ct_home_region)
-            except ClientError as e: 
-                print(e.response['Error']['Message']) 
+            except ClientError as e:
+                print(e.response['Error']['Message'])
                 cfnresponse.send(event, context, cfnresponse.FAILED, e.response)
 
         elif (event['RequestType'] == 'Delete'):
@@ -38,8 +38,8 @@ def lambda_handler(event, context):
                 for region in control_tower_regions:
                     if region in security_hub_regions:
                         disable_security_hub(security_hub_master_account_session, region, accounts)
-            except ClientError as e: 
-                print(e.response['Error']['Message']) 
+            except ClientError as e:
+                print(e.response['Error']['Message'])
                 cfnresponse.send(event, context, cfnresponse.FAILED, e.response)
 
         cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
@@ -47,7 +47,7 @@ def lambda_handler(event, context):
         for region in control_tower_regions:
             if region in security_hub_regions:
                 ct_home_region=enable_security_hub_master(security_hub_master_account_session, region)
-                enable_security_hub_member(security_hub_master_account_session, region, accounts, ct_home_region)     
+                enable_security_hub_member(security_hub_master_account_session, region, accounts, ct_home_region)
 
 def get_control_tower_regions():
     cloudformation_client=boto3.client('cloudformation')
@@ -152,7 +152,7 @@ def enable_security_hub_master(security_hub_master_account_session, region):
                     'roleARN': config_recorder['ConfigurationRecorders'][0]['roleARN'],
                     'recordingGroup': {
                         'allSupported': True,
-                        'includeGlobalResourceTypes': False 
+                        'includeGlobalResourceTypes': False
                     }
                 }
             )
@@ -195,7 +195,7 @@ def enable_security_hub_member(security_hub_master_account_session, region, acco
                             'roleARN': config_recorder['ConfigurationRecorders'][0]['roleARN'],
                             'recordingGroup': {
                                 'allSupported': True,
-                                'includeGlobalResourceTypes': False 
+                                'includeGlobalResourceTypes': False
                             }
                         }
                     )
@@ -230,7 +230,7 @@ def disable_security_hub(security_hub_master_account_session, region, accounts):
     delegated_admin_client=security_hub_master_account_session.client('securityhub', region_name=region, config=config)
     member_accounts=[]
     for account in accounts:
-        if account['Id'] != security_hub_master_account_id:        
+        if account['Id'] != security_hub_master_account_id:
             member_session=assume_role(account['Id'], role_to_assume)
             member_client=member_session.client('securityhub', region_name=region, config=config)
             member_accounts.append(account['Id'])
