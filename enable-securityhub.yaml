@@ -45,14 +45,14 @@ Parameters:
     Description: "Enable CIS AWS Foundations Benchmark v1.2.0 Security Standards Checks within Security Hub"
     AllowedValues:
       - "Yes"
-      - "No"    
+      - "No"
   EnablePCIDSS:
     Type: String
     Default: "No"
     Description: "Enable the PCI DSS v3.2.1 Security Standards Checks within Security Hub"
     AllowedValues:
       - "Yes"
-      - "No"    
+      - "No"
 Resources:
 
   # CloudFormation Custom Resources
@@ -62,12 +62,12 @@ Resources:
       ServiceToken: !GetAtt LambdaEnableOrganizationSecurityHub.Arn
 
   # Lambda Functions, Lambda Layers & Associated IAM Roles/Policies
-  LambdaEnableOrganizationSecurityHub: 
+  LambdaEnableOrganizationSecurityHub:
     Type: AWS::Lambda::Function
-    Properties: 
+    Properties:
       Architectures:
         - x86_64
-      Code: 
+      Code:
         S3Bucket: !Ref S3SourceBucket
         S3Key: !Ref S3Key
       Description: "Lambda Function that is triggered by CloudFormation Custom Resource to Enable Security Hub by Default in the Organization."
@@ -88,16 +88,16 @@ Resources:
             ROLE_TO_ASSUME: !Ref RoleToAssume
   IAMRoleEnableOrganizationSecurityHub:
     Type: AWS::IAM::Role
-    Properties: 
+    Properties:
       Description: "Service-Role for Lambda-Enable-Organization-Security-Hub to have the required access to execute successfully"
-      AssumeRolePolicyDocument: 
+      AssumeRolePolicyDocument:
         Version: "2012-10-17"
-        Statement: 
+        Statement:
           - Effect: "Allow"
-            Principal: 
-              Service: 
+            Principal:
+              Service:
                 - "lambda.amazonaws.com"
-            Action: 
+            Action:
               - "sts:AssumeRole"
       Path: "/"
       ManagedPolicyArns:
@@ -106,7 +106,7 @@ Resources:
       RoleName: "LambdaExecutionRole-EnableOrganizationSecurityHub"
   IAMPolicyEnableOrganisationSecurityHub:
     Type: AWS::IAM::ManagedPolicy
-    Properties: 
+    Properties:
       ManagedPolicyName: "Custom-Enable-Organisation-Security-Hub"
       Path: "/"
       PolicyDocument:
@@ -124,7 +124,7 @@ Resources:
             - "securityhub:DisableOrganizationAdminAccount"
             - "securityhub:EnableOrganizationAdminAccount"
             - "securityhub:ListOrganizationAdminAccounts"
-          Resource: 
+          Resource:
             - !Sub "arn:aws:securityhub:*:${AWS::AccountId}:hub/default"
         - Effect: "Allow"
           Action:
@@ -150,12 +150,12 @@ Resources:
           Resource:
             - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/AWSControlTowerBP-BASELINE-CONFIG:*"
 
-  LambdaEnableSecurityHubStandards: 
+  LambdaEnableSecurityHubStandards:
     Type: AWS::Lambda::Function
-    Properties: 
+    Properties:
       Architectures:
         - x86_64
-      Code: 
+      Code:
         ZipFile: |
           import boto3
           import os
@@ -277,17 +277,17 @@ Resources:
             AWS_FOUNDATIONS: !Ref EnableAWSFoundations
             CIS_FOUNDATIONS: !Ref EnableCISFoundations
             PCIDSS: !Ref EnablePCIDSS
-  IAMRoleEnableSecurityHubStandards: 
+  IAMRoleEnableSecurityHubStandards:
     Type: AWS::IAM::Role
-    Properties: 
-      AssumeRolePolicyDocument: 
+    Properties:
+      AssumeRolePolicyDocument:
         Version: "2012-10-17"
-        Statement: 
+        Statement:
           - Effect: "Allow"
-            Principal: 
-              Service: 
+            Principal:
+              Service:
                 - "lambda.amazonaws.com"
-            Action: 
+            Action:
               - "sts:AssumeRole"
       Path: "/"
       ManagedPolicyArns:
@@ -296,27 +296,27 @@ Resources:
       RoleName: "LambdaExecutionRole-EnableSecurityHubStandards"
   IAMPolicyEnableSecurityHubStandards:
     Type: AWS::IAM::ManagedPolicy
-    Properties: 
+    Properties:
       ManagedPolicyName: "Custom-Enable-Global-Security-Hub-Standards"
       Path: "/"
       PolicyDocument:
         Version: "2012-10-17"
-        Statement: 
+        Statement:
           - Effect: "Allow"
-            Action: 
+            Action:
               - "sts:AssumeRole"
             Resource:
               - !Sub "arn:aws:iam::*:role/${RoleToAssume}"
             Condition:
               StringEquals:
-                "aws:PrincipalOrgId": !Ref OrganizationId              
+                "aws:PrincipalOrgId": !Ref OrganizationId
 
-  LambdaDisableSecurityHubControlsAWSFoundations: 
+  LambdaDisableSecurityHubControlsAWSFoundations:
     Type: AWS::Lambda::Function
-    Properties: 
+    Properties:
       Architectures:
         - x86_64
-      Code: 
+      Code:
         ZipFile: |
           import boto3
           from botocore.config import Config
@@ -414,20 +414,20 @@ Resources:
                   aws_session_token=response['Credentials']['SessionToken']
               )
               print(f"Assumed session for Account ID: {aws_account_id}.")
-              return sts_session      
+              return sts_session
       FunctionName: "Lambda-Security-Hub-Disable-AWS-Foundations-Global-Controls"
       Handler: index.lambda_handler
-      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and disables both Global Controls and Non-Applicable Controls for the AWS Foundational Best Practices Security Standard within Security Hub in all ACTIVE AWS Accounts within the Organization"   
+      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and disables both Global Controls and Non-Applicable Controls for the AWS Foundational Best Practices Security Standard within Security Hub in all ACTIVE AWS Accounts within the Organization"
       Role: !GetAtt IAMRoleDisableGlobalSecurityHubControls.Arn
       Runtime: python3.9
       MemorySize: 128
-      Timeout: 300 
-  LambdaDisableSecurityHubControlsCISFoundations: 
+      Timeout: 300
+  LambdaDisableSecurityHubControlsCISFoundations:
     Type: AWS::Lambda::Function
-    Properties: 
+    Properties:
       Architectures:
         - x86_64
-      Code: 
+      Code:
         ZipFile: |
           import boto3
           from botocore.config import Config
@@ -498,7 +498,7 @@ Resources:
                           ControlStatus='DISABLED',
                           DisabledReason=f'This check is for a global resource and already enabled in {ct_home_region}. Enabling this global resource in multiple regions is repetitive and not required.'
                       )
-                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.9 - Ensure IAM password policy requires a minimum length of 14 or greater' in Region {region}.")                        
+                      print(f"Disabled CIS AWS Foundations Benchmark Control: '1.9 - Ensure IAM password policy requires a minimum length of 14 or greater' in Region {region}.")
                       member_client.update_standards_control(
                           StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/1.10',
                           ControlStatus='DISABLED',
@@ -577,7 +577,7 @@ Resources:
                       ControlStatus='DISABLED',
                       DisabledReason=f'Amazon GuardDuty is being used for anomaly detection instead of CloudWatch alarms, which can be noisy.'
                   )
-                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.2 - Ensure a log metric filter and alarm exist for AWS Management Console sign-in without MFA' in Region {region}.")    
+                  print(f"Disabled CIS AWS Foundations Benchmark Control: '3.2 - Ensure a log metric filter and alarm exist for AWS Management Console sign-in without MFA' in Region {region}.")
                   member_client.update_standards_control(
                       StandardsControlArn=f'arn:aws:securityhub:{region}:{account_id}:control/cis-aws-foundations-benchmark/v/1.2.0/3.3',
                       ControlStatus='DISABLED',
@@ -652,7 +652,7 @@ Resources:
                   print(f"Disabled CIS AWS Foundations Benchmark Control: '3.14 - Ensure a log metric filter and alarm exist for VPC changes' in Region {region}.")
               else:
                   print(f"CIS AWS Foundations Benchmark Control is not enabled in Account ID: {account_id} in Region {region}")
-                  
+
           def assume_role(aws_account_id, role_to_assume):
               sts_client=boto3.client('sts')
               response=sts_client.assume_role(
@@ -668,17 +668,17 @@ Resources:
               return sts_session
       FunctionName: "Lambda-Security-Hub-Disable-CIS-Foundations-Global-Controls"
       Handler: index.lambda_handler
-      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and disables both Global Controls and Non-Applicable Controls for the CIS AWS Foundations Benchmark Security Standard within Security Hub in all ACTIVE AWS Accounts within the Organization"      
+      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and disables both Global Controls and Non-Applicable Controls for the CIS AWS Foundations Benchmark Security Standard within Security Hub in all ACTIVE AWS Accounts within the Organization"
       Role: !GetAtt IAMRoleDisableGlobalSecurityHubControls.Arn
       Runtime: python3.9
       MemorySize: 128
       Timeout: 300
-  LambdaDisableSecurityHubControlsPCIDSS: 
+  LambdaDisableSecurityHubControlsPCIDSS:
     Type: AWS::Lambda::Function
-    Properties: 
+    Properties:
       Architectures:
         - x86_64
-      Code: 
+      Code:
         ZipFile: |
           import boto3
           from botocore.config import Config
@@ -742,7 +742,7 @@ Resources:
                           ControlStatus='DISABLED',
                           DisabledReason=f'Disabled recording of global resources in all regions other than {ct_home_region}. This rule requires recording of global resources in order to pass.'
                       )
-                      print(f"Disabled Payment Card Industry Data Security Standard Control: 'PCI.Config.1 - AWS Config should be enabled' in Region {region}.")                                                                        
+                      print(f"Disabled Payment Card Industry Data Security Standard Control: 'PCI.Config.1 - AWS Config should be enabled' in Region {region}.")
               else:
                   print(f"Payment Card Industry Data Security Standard is not enabled in Account ID: {account_id} in Region {region}")
 
@@ -762,22 +762,22 @@ Resources:
               return sts_session
       FunctionName: "Lambda-Security-Hub-Disable-PCIDSS-Global-Controls"
       Handler: index.lambda_handler
-      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and disables both Global Controls and Non-Applicable Controls for the Payment Card Industry Data Security Standard within Security Hub in all ACTIVE AWS Accounts within the Organization"            
+      Description: "Invoked by a Step Function called EnableSecurityHubStateMachine and disables both Global Controls and Non-Applicable Controls for the Payment Card Industry Data Security Standard within Security Hub in all ACTIVE AWS Accounts within the Organization"
       Role: !GetAtt IAMRoleDisableGlobalSecurityHubControls.Arn
       Runtime: python3.9
       MemorySize: 128
       Timeout: 300
-  IAMRoleDisableGlobalSecurityHubControls: 
+  IAMRoleDisableGlobalSecurityHubControls:
     Type: AWS::IAM::Role
-    Properties: 
-      AssumeRolePolicyDocument: 
+    Properties:
+      AssumeRolePolicyDocument:
         Version: "2012-10-17"
-        Statement: 
+        Statement:
           - Effect: "Allow"
-            Principal: 
-              Service: 
+            Principal:
+              Service:
                 - "lambda.amazonaws.com"
-            Action: 
+            Action:
               - "sts:AssumeRole"
       Path: "/"
       ManagedPolicyArns:
@@ -786,20 +786,20 @@ Resources:
       RoleName: "LambdaExecutionRole-DisableGlobalSecurityHubControls"
   IAMPolicyDisableGlobalSecurityHubControls:
     Type: AWS::IAM::ManagedPolicy
-    Properties: 
+    Properties:
       ManagedPolicyName: "Custom-Disable-Global-Security-Hub-Controls"
       Path: "/"
       PolicyDocument:
         Version: "2012-10-17"
-        Statement: 
+        Statement:
           - Effect: "Allow"
-            Action: 
+            Action:
               - "sts:AssumeRole"
             Resource:
               - !Sub "arn:aws:iam::*:role/${RoleToAssume}"
             Condition:
               StringEquals:
-                "aws:PrincipalOrgId": !Ref OrganizationId              
+                "aws:PrincipalOrgId": !Ref OrganizationId
 
   LambdaLayerCfnresponse:
     Type: AWS::Lambda::LayerVersion
@@ -820,14 +820,14 @@ Resources:
         S3Bucket: !Ref S3SourceBucket
         S3Key: "lambda-layers/boto3.zip"
       Description: v1.20 of Boto3
-      LayerName: boto3    
+      LayerName: boto3
 
   # Step Functions & Associated IAM Roles/Policies
   StepFunctionSecurityHub:
     Type: AWS::StepFunctions::StateMachine
     Properties:
       StateMachineName: SecurityHubStateMachine
-      DefinitionString: 
+      DefinitionString:
         Fn::Sub: |-
           {
             "StartAt": "Enable Security Hub Standards",
@@ -949,17 +949,17 @@ Resources:
             }
           }
       RoleArn: !GetAtt IAMRoleTriggerEnableSecurityHubStateMachine.Arn
-  IAMRoleTriggerEnableSecurityHubStateMachine: 
+  IAMRoleTriggerEnableSecurityHubStateMachine:
     Type: AWS::IAM::Role
-    Properties: 
-      AssumeRolePolicyDocument: 
+    Properties:
+      AssumeRolePolicyDocument:
         Version: "2012-10-17"
-        Statement: 
+        Statement:
           - Effect: "Allow"
-            Principal: 
-              Service: 
+            Principal:
+              Service:
                 - "states.amazonaws.com"
-            Action: 
+            Action:
               - "sts:AssumeRole"
       Path: "/"
       ManagedPolicyArns:
@@ -967,28 +967,28 @@ Resources:
       RoleName: "StepFunctionsExecutionRole-TriggerEnableSecurityHubStateMachine"
   IAMPolicyTriggerEnableSecurityHubStateMachine:
     Type: AWS::IAM::ManagedPolicy
-    Properties: 
+    Properties:
       ManagedPolicyName: "Custom-Trigger-Security-Hub-State-Machine"
       Path: "/"
       PolicyDocument:
         Version: "2012-10-17"
-        Statement: 
+        Statement:
           - Effect: "Allow"
-            Action: 
+            Action:
               - "lambda:InvokeFunction"
-            Resource: 
+            Resource:
               - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaEnableSecurityHubStandards}:$LATEST"
               - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaDisableSecurityHubControlsAWSFoundations}:$LATEST"
               - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaDisableSecurityHubControlsCISFoundations}:$LATEST"
               - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaDisableSecurityHubControlsPCIDSS}:$LATEST"
 
   # EventBridge Rules & Permissions
-  LifeCycleRuleSecurityHub: 
+  LifeCycleRuleSecurityHub:
     Type: AWS::Events::Rule
-    Properties: 
+    Properties:
       Description: "AWS Security Hub LifeCycle Trigger"
       EventPattern:
-        source: 
+        source:
           - "aws.controltower"
         detail-type:
           - "AWS Service Event via CloudTrail"
@@ -996,12 +996,12 @@ Resources:
           eventName:
             - "CreateManagedAccount"
       State: "ENABLED"
-      Targets: 
+      Targets:
         - Arn: !GetAtt LambdaEnableOrganizationSecurityHub.Arn
           Id: "NewAccount"
-  PermissionForCTEventToInvokeLambda: 
+  PermissionForCTEventToInvokeLambda:
     Type: AWS::Lambda::Permission
-    Properties: 
+    Properties:
       FunctionName: !GetAtt LambdaEnableOrganizationSecurityHub.Arn
       Action: "lambda:InvokeFunction"
       Principal: "events.amazonaws.com"
